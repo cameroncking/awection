@@ -8,19 +8,9 @@ import {
   recordSecurityEvent
 } from "./db.js";
 import { ContactKind, Viewer } from "./types.js";
-import {
-  detectContactKind,
-  env,
-  generateCode,
-  hashValue,
-  nicknameFromSeed,
-  normalizeEmail,
-  normalizePhone,
-  nowIso,
-  randomToken
-} from "./utils.js";
+import { detectContactKind, env, generateCode, hashValue, normalizeEmail, normalizePhone, nowIso, randomToken } from "./utils.js";
 
-export async function requestAuthCode(contactInput: string, nickname?: string) {
+export async function requestAuthCode(contactInput: string) {
   const kind = detectContactKind(contactInput) as ContactKind;
   const contact = kind === "email" ? normalizeEmail(contactInput) : normalizePhone(contactInput);
   pruneSecurityEvents(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
@@ -46,18 +36,11 @@ export async function requestAuthCode(contactInput: string, nickname?: string) {
 
   db.prepare("DELETE FROM auth_codes WHERE contact = ?").run(contact);
   db.prepare(
-    "INSERT INTO auth_codes (contact, code, expires_at, nickname_hint, created_at) VALUES (?, ?, ?, ?, ?)"
-  ).run(contact, hashValue(`${contact}:${code}`), expiresAt, nickname?.trim() || null, nowIso());
+    "INSERT INTO auth_codes (contact, code, expires_at, created_at) VALUES (?, ?, ?, ?)"
+  ).run(contact, hashValue(`${contact}:${code}`), expiresAt, nowIso());
 
   await deliverMessage(kind, contact, "Your auction sign-in code", `<p>Your sign-in code is <strong>${code}</strong>.</p><p>It expires in 10 minutes.</p>`, `Your sign-in code is ${code}. It expires in 10 minutes.`, "auth-code");
   return { contact, kind, expiresAt };
-}
-
-export function lookupContact(contactInput: string) {
-  const kind = detectContactKind(contactInput) as ContactKind;
-  const contact = kind === "email" ? normalizeEmail(contactInput) : normalizePhone(contactInput);
-  const user = kind === "email" ? findUserByContact(contact, null) : findUserByContact(null, contact);
-  return { kind, contact, user };
 }
 
 export async function deliverMessage(
@@ -117,11 +100,12 @@ export function verifyAuthCode(contactInput: string, code: string, remoteKey: st
     throw new Error("Too many failed attempts. Wait a few minutes and request a new code.");
   }
   const authCode = db.prepare(`
-    SELECT * FROM auth_codes
+    SELECT 1 AS present
+    FROM auth_codes
     WHERE contact = ? AND code = ? AND expires_at > ?
     ORDER BY created_at DESC
     LIMIT 1
-  `).get(contact, hashValue(`${contact}:${code.trim()}`), nowIso()) as { nickname_hint: string | null } | undefined;
+  `).get(contact, hashValue(`${contact}:${code.trim()}`), nowIso()) as { present: number } | undefined;
 
   if (!authCode) {
     recordSecurityEvent("auth_verify_contact", contact);
@@ -129,32 +113,20 @@ export function verifyAuthCode(contactInput: string, code: string, remoteKey: st
     throw new Error("That code is invalid or expired.");
   }
 
-  let viewer: Viewer;
-  if (kind === "email") {
-    viewer = ensureUser(contact, null, authCode.nickname_hint || nicknameFromSeed(contact));
-  } else {
-    viewer = ensureUser(null, contact, authCode.nickname_hint || nicknameFromSeed(contact));
-  }
+  const existingViewer = kind === "email" ? findUserByContact(contact, null) : findUserByContact(null, contact);
+  const viewer: Viewer = existingViewer
+    ? existingViewer
+    : kind === "email"
+      ? ensureUser(contact, null, "")
+      : ensureUser(null, contact, "");
 
   db.prepare("DELETE FROM auth_codes WHERE contact = ?").run(contact);
   clearSecurityEvents("auth_verify_contact", contact);
   clearSecurityEvents("auth_verify_ip", normalizedRemoteKey);
-  return createSession(viewer.id, false);
-}
-
-export function createAdminSession(adminPassword: string, remoteKey: string) {
-  const normalizedRemoteKey = remoteKey.trim() || "unknown";
-  const windowStart = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-  if (countSecurityEventsSince("admin_login_ip", normalizedRemoteKey, windowStart) >= 10) {
-    throw new Error("Too many failed admin logins. Wait a few minutes and try again.");
-  }
-  if (!env("ADMIN_PASSWORD") || adminPassword !== env("ADMIN_PASSWORD")) {
-    recordSecurityEvent("admin_login_ip", normalizedRemoteKey);
-    throw new Error("Incorrect admin password.");
-  }
-  clearSecurityEvents("admin_login_ip", normalizedRemoteKey);
-  const adminUser = ensureUser("admin@local.invalid", null, "Auction Admin");
-  return createSession(adminUser.id, true);
+  return {
+    session: createSession(viewer.id, isAdminContact(contact)),
+    needsNickname: !viewer.nickname.trim()
+  };
 }
 
 function createSession(userId: number, isAdmin: boolean) {
@@ -169,4 +141,16 @@ function createSession(userId: number, isAdmin: boolean) {
 
 export function clearSession(token: string) {
   db.prepare("DELETE FROM sessions WHERE token_hash = ?").run(hashValue(token));
+}
+
+function isAdminContact(contact: string) {
+  const configured = env("ADMIN_CONTACT")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return configured.some((entry) => {
+    const kind = detectContactKind(entry) as ContactKind;
+    const normalized = kind === "email" ? normalizeEmail(entry) : normalizePhone(entry);
+    return contact === normalized;
+  });
 }

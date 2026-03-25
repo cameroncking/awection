@@ -40,7 +40,7 @@ export type Flash = {
   message: string;
 };
 
-export type LoginStep = "start" | "register" | "verify";
+export type LoginStep = "start" | "verify" | "nickname";
 
 export type AccountBidRow = {
   item_id: number;

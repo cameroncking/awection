@@ -5,12 +5,13 @@ type LayoutOptions = {
   title: string;
   auctionEndsAt: string;
   siteTitle: string;
+  csrfToken: string;
   viewer?: Viewer | null;
   flash?: Flash | null;
   body: string;
 };
 
-export function renderLayout({ title, auctionEndsAt, siteTitle, viewer, flash, body }: LayoutOptions) {
+export function renderLayout({ title, auctionEndsAt, siteTitle, csrfToken, viewer, flash, body }: LayoutOptions) {
   return `<!doctype html>
   <html lang="en">
     <head>
@@ -33,8 +34,8 @@ export function renderLayout({ title, auctionEndsAt, siteTitle, viewer, flash, b
           <a href="/" class="brand">${escapeHtml(siteTitle)}</a>
           <div class="topbar__actions">
             <a href="/categories">Categories</a>
-            ${viewer ? `<a href="/account">Profile</a><a href="/wins">My Wins</a><span class="chip">${escapeHtml(viewer.nickname)}</span><form method="post" action="/logout"><button class="link-button">Log out</button></form>` : `<a class="button button--ghost" href="/login">Bid / Sign in</a>`}
-            ${viewer?.isAdmin ? `<a class="button button--dark" href="/admin">Admin</a>` : `<a href="/admin/login">Admin</a>`}
+            ${viewer ? `<a href="/account">Profile</a><a href="/wins">My Wins</a><span class="chip">${escapeHtml(viewer.nickname)}</span><form method="post" action="/logout"><input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}" /><button class="link-button" type="submit">Log out</button></form>` : `<a class="button button--ghost" href="/login">Bid / Sign in</a>`}
+            ${viewer?.isAdmin ? `<a class="button button--dark" href="/admin">Admin</a>` : ``}
           </div>
         </nav>
         ${flash ? `<div class="flash flash--${flash.kind}">${escapeHtml(flash.message)}</div>` : ""}
@@ -205,43 +206,18 @@ export function renderItemPage(
   `;
 }
 
-export function renderLoginPage(step: LoginStep, values?: { contact?: string; nickname?: string; isNew?: boolean }) {
+export function renderLoginPage(step: LoginStep, values?: { contact?: string }) {
   const contact = escapeHtml(values?.contact || "");
-  const nickname = escapeHtml(values?.nickname || "");
-  if (step === "register") {
-    return `
-      <section class="auth-shell">
-        <div class="auth-card">
-          <p class="eyebrow">Create your bidder profile</p>
-          <h1>Add a nickname if you want one</h1>
-          <p>You only need this once. Leave it blank and we’ll generate one for you.</p>
-          <form method="post" action="/login/register" class="stack">
-            <input type="hidden" name="contact" value="${contact}" />
-            <label>Email or phone
-              <input type="text" value="${contact}" disabled />
-            </label>
-            <label>Nickname
-              <input type="text" name="nickname" value="${nickname}" placeholder="Optional nickname" />
-            </label>
-            <button class="button" type="submit">Register</button>
-          </form>
-          <p><a href="/login">Use a different email or phone</a></p>
-        </div>
-      </section>
-    `;
-  }
 
   if (step === "verify") {
-    const isNew = values?.isNew ? "1" : "0";
     return `
       <section class="auth-shell">
         <div class="auth-card">
           <p class="eyebrow">Check your ${contact.includes("@") ? "email" : "phone"}</p>
           <h1>We sent you a login code</h1>
-          <p>Enter the code to ${values?.isNew ? "finish registration and " : ""}log in.</p>
+          <p>Enter the code to log in.</p>
           <form method="post" action="/login/verify" class="stack">
             <input type="hidden" name="contact" value="${contact}" />
-            <input type="hidden" name="is_new" value="${isNew}" />
             <label>Login code
               <input type="text" name="code" inputmode="numeric" required autofocus />
             </label>
@@ -249,9 +225,25 @@ export function renderLoginPage(step: LoginStep, values?: { contact?: string; ni
           </form>
           <form method="post" action="/login/resend" class="stack stack--compact">
             <input type="hidden" name="contact" value="${contact}" />
-            <input type="hidden" name="nickname" value="${nickname}" />
-            <input type="hidden" name="is_new" value="${isNew}" />
             <button class="link-button" type="submit">Send a new code</button>
+          </form>
+        </div>
+      </section>
+    `;
+  }
+
+  if (step === "nickname") {
+    return `
+      <section class="auth-shell">
+        <div class="auth-card">
+          <p class="eyebrow">One more step</p>
+          <h1>Choose your nickname</h1>
+          <p>Your nickname is shown with your bids. You can change it later from your profile.</p>
+          <form method="post" action="/login/nickname" class="stack">
+            <label>Nickname
+              <input type="text" name="nickname" required autofocus />
+            </label>
+            <button class="button" type="submit">Save nickname</button>
           </form>
         </div>
       </section>
@@ -263,13 +255,10 @@ export function renderLoginPage(step: LoginStep, values?: { contact?: string; ni
       <div class="auth-card">
         <p class="eyebrow">Passwordless sign-in</p>
         <h1>Enter your email or phone</h1>
-        <p>Browse first. Sign in only when you want to bid, track activity, or check out a win. If you are new, your nickname will be saved when you enter your code.</p>
+        <p>Browse first. Sign in only when you want to bid, track activity, or check out a win.</p>
         <form method="post" action="/login/start" class="stack">
           <label>Email or phone
             <input type="text" name="contact" placeholder="name@example.com or 555-123-4567" required />
-          </label>
-          <label>Nickname
-            <input type="text" name="nickname" placeholder="Optional for new bidders" />
           </label>
           <button class="button" type="submit">Continue</button>
         </form>
@@ -282,7 +271,7 @@ export function renderAccountPage(
   viewer: Viewer,
   items: Array<{ item_slug: string; item_title: string; category_name: string; my_bid_cents: number; leading_bid_cents: number; status: string }>,
   payment: { hasPaymentMethod: boolean; canRemove: boolean; statusLabel: string },
-  notifications: { outbid: boolean; won: boolean; payment: boolean }
+  notifications: { outbid: boolean; won: boolean; payment: boolean; adminPayment: boolean }
 ) {
   return `
     <section class="section">
@@ -332,6 +321,12 @@ export function renderAccountPage(
               <input type="checkbox" name="payment" value="1" ${notifications.payment ? "checked" : ""} />
               <span>Payment collected notifications</span>
             </label>
+            ${viewer.isAdmin ? `
+              <label class="toggle-row">
+                <input type="checkbox" name="admin_payment" value="1" ${notifications.adminPayment ? "checked" : ""} />
+                <span>Admin payment success and failure notifications</span>
+              </label>
+            ` : ""}
           </div>
           <button class="button" type="submit">Save notification settings</button>
         </form>
@@ -389,27 +384,10 @@ export function renderWinsPage(
                 : `<span class="chip">Awaiting admin review</span>`
               }
               <span class="checkout-pass">Show this phone to checkout staff</span>
-              <span class="chip">${escapeHtml(item.purchase_status || "Awaiting payment")}</span>
+              <span class="chip">${escapeHtml(formatStatusLabel(item.purchase_status || "Awaiting payment"))}</span>
             </div>
           </article>
         `).join("") : `<p class="empty-state">No winning items yet.</p>`}
-      </div>
-    </section>
-  `;
-}
-
-export function renderAdminLogin() {
-  return `
-    <section class="auth-shell">
-      <div class="auth-card">
-        <p class="eyebrow">Admin</p>
-        <h1>Single-password access</h1>
-        <form method="post" action="/admin/login" class="stack">
-          <label>Password
-            <input type="password" name="password" required />
-          </label>
-          <button class="button button--dark" type="submit">Enter admin panel</button>
-        </form>
       </div>
     </section>
   `;
@@ -439,52 +417,74 @@ export function renderAdminPanel(
   auctionClosed: boolean,
   bids: Array<{ id: number; item_slug: string; item_title: string; category_name: string; nickname: string; contact: string; amount_cents: number; created_at: string; purchase_status: string | null }>,
   eligibilityAlerts: Array<{ slug: string; title: string; category_name: string; top_bidder_nickname: string; top_bidder_contact: string; top_bid_amount_cents: number; top_bidder_payment_status: string; eligible_winner_nickname: string | null; eligible_winner_amount_cents: number | null }>,
+  adminAlerts: Array<{ id: number; level: string; message: string; created_at: string }>,
   auctionEndsAt: string,
   content: { siteTitle: string; homeHeading: string; homeDescription: string }
 ) {
   const localDateTimeValue = toLocalDateTimeValue(auctionEndsAt);
   return `
+    ${adminAlerts.length > 0 ? `
+      <section class="section">
+        <div class="section__header">
+          <div>
+            <p class="eyebrow">Admin alerts</p>
+            <h1>Recent system issues</h1>
+          </div>
+        </div>
+        <div class="wins-list">
+          ${adminAlerts.map((alert) => `
+            <article class="win-card">
+              <div>
+                <p><strong>${escapeHtml(alert.level.toUpperCase())}</strong></p>
+                <p>${escapeHtml(alert.message)}</p>
+              </div>
+              <div class="win-card__actions">
+                <span class="chip">${new Date(alert.created_at).toLocaleString()}</span>
+              </div>
+            </article>
+          `).join("")}
+        </div>
+      </section>
+    ` : ""}
     <section class="section">
       <div class="section__header">
         <div>
           <p class="eyebrow">Admin</p>
-          <h1>Item operations</h1>
+          <h1>Settings</h1>
         </div>
         <div class="topbar__actions">
           <a class="button button--ghost" href="/admin/export.csv">Download CSV</a>
         </div>
       </div>
-      <form method="post" action="/admin/auction-end" class="auth-card stack">
-        <h2>Auction end time</h2>
-        <label>Ends at
-          <input type="datetime-local" name="auction_ends_at" value="${escapeHtml(localDateTimeValue)}" required />
-        </label>
-        <button class="button" type="submit">Update end time</button>
-      </form>
-      <form method="post" action="/admin/site-content" class="auth-card stack">
-        <h2>Site content</h2>
-        <label>Site title
-          <input type="text" name="site_title" value="${escapeHtml(content.siteTitle)}" required />
-        </label>
-        <label>Home page heading
-          <input type="text" name="home_heading" value="${escapeHtml(content.homeHeading)}" required />
-        </label>
-        <label>Home page description
-          <input type="text" name="home_description" value="${escapeHtml(content.homeDescription)}" required />
-        </label>
-        <button class="button" type="submit">Update site content</button>
-      </form>
-      <div class="admin-grid">
-        <form method="post" action="/admin/upload" enctype="multipart/form-data" class="auth-card stack">
-          <h2>Spreadsheet upload</h2>
-          <input type="file" name="sheet" accept=".csv,text/csv" required />
-          <button class="button" type="submit">Upload new rows</button>
+      <div class="admin-settings-grid">
+        <form method="post" action="/admin/site-content" class="auth-card stack">
+          <h2>Site content</h2>
+          <label>Site title
+            <input type="text" name="site_title" value="${escapeHtml(content.siteTitle)}" required />
+          </label>
+          <label>Home page heading
+            <input type="text" name="home_heading" value="${escapeHtml(content.homeHeading)}" required />
+          </label>
+          <label>Home page description
+            <input type="text" name="home_description" value="${escapeHtml(content.homeDescription)}" required />
+          </label>
+          <button class="button" type="submit">Update site content</button>
         </form>
-        <form method="post" action="/admin/update" enctype="multipart/form-data" class="auth-card stack">
-          <h2>Upload and update</h2>
-          <input type="file" name="sheet" accept=".csv,text/csv" required />
-          <button class="button button--dark" type="submit">Upload and update rows</button>
-        </form>
+        <div class="stack admin-settings-side">
+          <form method="post" action="/admin/auction-end" class="auth-card stack">
+            <h2>Auction end time</h2>
+            <label>Ends at
+              <input type="datetime-local" name="auction_ends_at" value="${escapeHtml(localDateTimeValue)}" required />
+            </label>
+            <button class="button" type="submit">Update end time</button>
+          </form>
+          <form method="post" action="/admin/upload" enctype="multipart/form-data" class="auth-card stack">
+            <h2>Spreadsheet upload</h2>
+            <input type="file" name="sheet" accept=".csv,text/csv" required />
+            <p class="empty-state">Uploads add new items and update existing items in place by slug.</p>
+            <button class="button" type="submit">Upload spreadsheet</button>
+          </form>
+        </div>
       </div>
       <div class="table-wrap">
         <table class="admin-table">
@@ -551,7 +551,7 @@ export function renderAdminPanel(
         <div class="section__header">
           <div>
             <p class="eyebrow">Review winners</p>
-            <h1>Collect payment per item</h1>
+            <h1>Collect payment per user</h1>
           </div>
         </div>
         <div class="wins-list">
@@ -577,7 +577,7 @@ export function renderAdminPanel(
                   ? `<a class="button" href="${escapeHtml(winner.stripe_checkout_url)}">Open collection link</a>`
                   : `<form method="post" action="/admin/winners/users/${winner.user_id}/collect"><button class="button" type="submit">Collect total</button></form>`
                 }
-                <span class="chip">${escapeHtml(winner.purchase_status || "Awaiting review")}</span>
+                <span class="chip">${escapeHtml(formatStatusLabel(winner.purchase_status || "Awaiting review"))}</span>
               </div>
             </article>
           `).join("") : `<p class="empty-state">No winning bids yet.</p>`}
@@ -603,7 +603,7 @@ export function renderAdminPanel(
               <p>Placed: <strong>${new Date(bid.created_at).toLocaleString()}</strong></p>
             </div>
             <div class="win-card__actions">
-              <span class="chip">${escapeHtml(bid.purchase_status || "No collection started")}</span>
+              <span class="chip">${escapeHtml(formatStatusLabel(bid.purchase_status || "No collection started"))}</span>
               <form method="post" action="/admin/bids/${bid.id}/cancel">
                 <button class="button button--ghost" type="submit">Cancel bid</button>
               </form>
@@ -703,6 +703,16 @@ function centsToDollars(value: string | number | null | undefined) {
     return String(value);
   }
   return (numberValue / 100).toFixed(2);
+}
+
+function formatStatusLabel(value: string) {
+  return value
+    .trim()
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function toLocalDateTimeValue(iso: string) {

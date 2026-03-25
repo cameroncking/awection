@@ -231,6 +231,7 @@ input {
 .category-grid,
 .item-grid,
 .admin-grid,
+.admin-settings-grid,
 .wins-list,
 .history-list,
 .stack {
@@ -240,6 +241,10 @@ input {
 
 .admin-grid {
   align-items: start;
+}
+
+.admin-settings-side {
+  align-content: start;
 }
 
 .stack--compact {
@@ -287,7 +292,8 @@ input {
 
 .category-grid,
 .item-grid,
-.admin-grid {
+.admin-grid,
+.admin-settings-grid {
   grid-template-columns: 1fr;
 }
 
@@ -465,6 +471,7 @@ input {
   }
 
   .admin-grid,
+  .admin-settings-grid,
   .price-stack,
   .meta-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

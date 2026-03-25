@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import fs from "node:fs";
 import path from "node:path";
 import { AccountBidRow, DashboardData, ItemRow, Viewer } from "./types.js";
-import { env, nicknameFromSeed, nowIso, slugify } from "./utils.js";
+import { detectContactKind, env, normalizeEmail, normalizePhone, nowIso, slugify } from "./utils.js";
 
 const dbPath = path.resolve(process.cwd(), env("DB_PATH", "./data/awection.sqlite"));
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -30,7 +30,6 @@ export function initDb() {
       contact TEXT NOT NULL,
       code TEXT NOT NULL,
       expires_at TEXT NOT NULL,
-      nickname_hint TEXT,
       created_at TEXT NOT NULL
     );
 
@@ -42,6 +41,15 @@ export function initDb() {
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       FOREIGN KEY(user_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS pending_registrations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token TEXT NOT NULL UNIQUE,
+      contact TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS items (
@@ -133,6 +141,7 @@ export function initDb() {
       outbid_enabled INTEGER NOT NULL DEFAULT 1,
       won_enabled INTEGER NOT NULL DEFAULT 1,
       payment_enabled INTEGER NOT NULL DEFAULT 1,
+      admin_payment_enabled INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY(user_id) REFERENCES users(id)
     );
 
@@ -150,6 +159,13 @@ export function initDb() {
       event_key TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS admin_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      level TEXT NOT NULL,
+      message TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
 
   try {
@@ -164,12 +180,17 @@ export function initDb() {
     // Migration already applied.
   }
 
+  try {
+    db.exec("ALTER TABLE notification_preferences ADD COLUMN admin_payment_enabled INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    // Migration already applied.
+  }
+
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('auction_ends_at', ?)")
     .run(env("AUCTION_ENDS_AT", new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()));
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('site_title', 'Awection')").run();
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('home_heading', 'Fast to browse. Fast to bid. Built for a phone in one hand.')").run();
   db.prepare("INSERT OR IGNORE INTO settings (key, value) VALUES ('home_description', 'Jump straight into active items, explore by category, and only sign in when you’re ready to place a bid or check out a win.')").run();
-
   seedIfEmpty();
 }
 
@@ -273,7 +294,7 @@ function seedIfEmpty() {
     );
   });
 
-  const guest = ensureUser(null, "5550001111", nicknameFromSeed("seed-demo"));
+  const guest = ensureUser(null, "5550001111", "Seed Demo");
   const items = db.prepare("SELECT id, starting_bid_cents FROM items ORDER BY id LIMIT 3").all() as Array<{ id: number; starting_bid_cents: number }>;
   const insertBid = db.prepare("INSERT INTO bids (item_id, user_id, amount_cents, created_at) VALUES (?, ?, ?, ?)");
   const updateItem = db.prepare("UPDATE items SET bid_count = bid_count + 1, popularity_score = popularity_score + 25, last_bid_at = ? WHERE id = ?");
@@ -284,13 +305,13 @@ function seedIfEmpty() {
   });
 }
 
-export function ensureUser(email: string | null, phone: string | null, nickname?: string) {
+export function ensureUser(email: string | null, phone: string | null, nickname = "") {
   const existing = db.prepare("SELECT * FROM users WHERE email = ? OR phone = ?").get(email, phone) as Viewer | undefined;
   if (existing) {
     return existing;
   }
   const createdAt = nowIso();
-  const resolvedNickname = nickname?.trim() || nicknameFromSeed(email || phone || createdAt);
+  const resolvedNickname = nickname.trim();
   const result = db.prepare(
     "INSERT INTO users (email, phone, nickname, created_at) VALUES (?, ?, ?, ?)"
   ).run(email, phone, resolvedNickname, createdAt);
@@ -332,23 +353,62 @@ export function updateUserNickname(userId: number, nickname: string) {
 export function getNotificationPreferences(userId: number) {
   db.prepare("INSERT OR IGNORE INTO notification_preferences (user_id) VALUES (?)").run(userId);
   return db.prepare(`
-    SELECT outbid_enabled, won_enabled, payment_enabled
+    SELECT outbid_enabled, won_enabled, payment_enabled, admin_payment_enabled
     FROM notification_preferences
     WHERE user_id = ?
   `).get(userId) as {
     outbid_enabled: number;
     won_enabled: number;
     payment_enabled: number;
+    admin_payment_enabled: number;
   };
 }
 
-export function updateNotificationPreferences(userId: number, input: { outbid: boolean; won: boolean; payment: boolean }) {
+export function updateNotificationPreferences(userId: number, input: { outbid: boolean; won: boolean; payment: boolean; adminPayment?: boolean }) {
   db.prepare("INSERT OR IGNORE INTO notification_preferences (user_id) VALUES (?)").run(userId);
   db.prepare(`
     UPDATE notification_preferences
-    SET outbid_enabled = ?, won_enabled = ?, payment_enabled = ?
+    SET outbid_enabled = ?, won_enabled = ?, payment_enabled = ?, admin_payment_enabled = ?
     WHERE user_id = ?
-  `).run(input.outbid ? 1 : 0, input.won ? 1 : 0, input.payment ? 1 : 0, userId);
+  `).run(input.outbid ? 1 : 0, input.won ? 1 : 0, input.payment ? 1 : 0, input.adminPayment ? 1 : 0, userId);
+}
+
+export function getAdminNotificationRecipients() {
+  const adminContacts = env("ADMIN_CONTACT")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (adminContacts.length === 0) {
+    return [];
+  }
+  const emails = adminContacts.filter((value) => detectContactKind(value) === "email").map((value) => normalizeEmail(value));
+  const phones = adminContacts.filter((value) => detectContactKind(value) !== "email").map((value) => normalizePhone(value));
+  const emailPlaceholders = emails.map(() => "?").join(", ");
+  const phonePlaceholders = phones.map(() => "?").join(", ");
+  const clauses: string[] = [];
+  const params: string[] = [];
+  if (emails.length > 0) {
+    clauses.push(`users.email IN (${emailPlaceholders})`);
+    params.push(...emails);
+  }
+  if (phones.length > 0) {
+    clauses.push(`users.phone IN (${phonePlaceholders})`);
+    params.push(...phones);
+  }
+  if (clauses.length === 0) {
+    return [];
+  }
+  return db.prepare(`
+    SELECT users.id, users.email, users.phone
+    FROM users
+    JOIN notification_preferences ON notification_preferences.user_id = users.id
+    WHERE notification_preferences.admin_payment_enabled = 1
+      AND (${clauses.join(" OR ")})
+  `).all(...params) as Array<{
+    id: number;
+    email: string | null;
+    phone: string | null;
+  }>;
 }
 
 export function hasNotificationEvent(eventType: string, eventKey: string) {
@@ -390,13 +450,61 @@ export function pruneSecurityEvents(beforeIso: string) {
   db.prepare("DELETE FROM security_events WHERE created_at < ?").run(beforeIso);
 }
 
-export function getViewerBySessionHash(tokenHash: string) {
+export function createAdminAlert(level: string, message: string) {
+  db.prepare(`
+    INSERT INTO admin_alerts (level, message, created_at)
+    VALUES (?, ?, ?)
+  `).run(level, message, nowIso());
+}
+
+export function listAdminAlerts(limit = 20) {
   return db.prepare(`
+    SELECT id, level, message, created_at
+    FROM admin_alerts
+    ORDER BY created_at DESC
+    LIMIT ?
+  `).all(limit) as Array<{
+    id: number;
+    level: string;
+    message: string;
+    created_at: string;
+  }>;
+}
+
+export function getViewerBySessionHash(tokenHash: string) {
+  const viewer = db.prepare(`
     SELECT users.id, users.nickname, users.email, users.phone, sessions.is_admin AS isAdmin
     FROM sessions
     JOIN users ON users.id = sessions.user_id
     WHERE sessions.token_hash = ? AND sessions.expires_at > ?
   `).get(tokenHash, nowIso()) as Viewer | undefined;
+  if (!viewer) {
+    return undefined;
+  }
+  return {
+    ...viewer,
+    isAdmin: isConfiguredAdminContact(viewer.email, viewer.phone)
+  };
+}
+
+function isConfiguredAdminContact(email: string | null, phone: string | null) {
+  const configured = env("ADMIN_CONTACT")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return configured.some((entry) => {
+    const kind = detectContactKind(entry);
+    if (kind === "email") {
+      if (!email) {
+        return false;
+      }
+      return normalizeEmail(entry) === normalizeEmail(email);
+    }
+    if (!phone) {
+      return false;
+    }
+    return normalizePhone(entry) === normalizePhone(phone);
+  });
 }
 
 export function getCategories() {
@@ -1103,6 +1211,32 @@ export function deletePendingBidAttempt(token: string) {
   db.prepare("DELETE FROM pending_bid_attempts WHERE token = ?").run(token);
 }
 
+export function createPendingRegistration(contact: string, kind: "email" | "phone", token: string) {
+  const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+  db.prepare("DELETE FROM pending_registrations WHERE contact = ?").run(contact);
+  db.prepare(`
+    INSERT INTO pending_registrations (token, contact, kind, expires_at, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(token, contact, kind, expiresAt, nowIso());
+}
+
+export function getPendingRegistration(token: string) {
+  return db.prepare(`
+    SELECT token, contact, kind
+    FROM pending_registrations
+    WHERE token = ? AND expires_at > ?
+    LIMIT 1
+  `).get(token, nowIso()) as {
+    token: string;
+    contact: string;
+    kind: "email" | "phone";
+  } | undefined;
+}
+
+export function deletePendingRegistration(token: string) {
+  db.prepare("DELETE FROM pending_registrations WHERE token = ?").run(token);
+}
+
 export function cancelBidByAdmin(bidId: number) {
   const bid = db.prepare(`
     SELECT bids.id, bids.item_id, bids.user_id, items.slug
@@ -1299,7 +1433,7 @@ export function deleteAdminItem(itemId: number) {
   transaction();
 }
 
-export function upsertItemsFromRows(rows: Array<Record<string, string>>, mode: "upload" | "update") {
+export function upsertItemsFromRows(rows: Array<Record<string, string>>) {
   const insertCategory = db.prepare("INSERT OR IGNORE INTO categories (name, slug) VALUES (?, ?)");
   const insertItem = db.prepare(`
     INSERT INTO items (
@@ -1346,9 +1480,7 @@ export function upsertItemsFromRows(rows: Array<Record<string, string>>, mode: "
       ];
 
       if (existing) {
-        if (mode === "update") {
-          updateItem.run(...params, slug);
-        }
+        updateItem.run(...params, slug);
       } else {
         insertItem.run(slug, ...params, createdAt);
       }

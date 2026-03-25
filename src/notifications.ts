@@ -1,8 +1,8 @@
 import { deliverMessage } from "./auth.js";
 import {
+  getAdminNotificationRecipients,
   getNotificationPreferences,
   getPendingWonNotifications,
-  getUserById,
   getUserPrimaryContact,
   hasNotificationEvent,
   recordNotificationEvent
@@ -15,9 +15,8 @@ export async function sendOutbidNotification(userId: number, item: { title: stri
   if (!prefs.outbid_enabled) {
     return;
   }
-  const user = getUserById(userId);
   const contact = getUserPrimaryContact(userId);
-  if (!user || !contact) {
+  if (!contact) {
     return;
   }
   const url = `${env("BASE_URL", "http://localhost:3000")}/items/${item.slug}`;
@@ -79,4 +78,37 @@ export async function sendPaymentCollectedNotificationIfNeeded(userId: number, t
     "payment-collected"
   );
   recordNotificationEvent("payment_collected", `user:${userId}:total:${totalAmountCents}`);
+}
+
+export async function sendAdminPaymentFailureAlert(message: string) {
+  await sendAdminPaymentAlert("Awection payment collection failed", message);
+}
+
+export async function sendAdminPaymentSuccessAlert(message: string) {
+  await sendAdminPaymentAlert("Awection payment collected", message);
+}
+
+async function sendAdminPaymentAlert(subject: string, message: string) {
+  const recipients = getAdminNotificationRecipients();
+  if (recipients.length === 0) {
+    return;
+  }
+  for (const recipient of recipients) {
+    const contact = recipient.email
+      ? { kind: "email" as ContactKind, contact: recipient.email }
+      : recipient.phone
+        ? { kind: "phone" as ContactKind, contact: recipient.phone }
+        : null;
+    if (!contact) {
+      continue;
+    }
+    await deliverMessage(
+      contact.kind,
+      contact.contact,
+      subject,
+      `<p>${message}</p>`,
+      message,
+      "admin-alert"
+    );
+  }
 }

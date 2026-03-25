@@ -3,10 +3,11 @@ import express from "express";
 import multer from "multer";
 import crypto from "node:crypto";
 import path from "node:path";
-import { clearSession, createAdminSession, requestAuthCode, verifyAuthCode } from "./auth.js";
+import { clearSession, requestAuthCode, verifyAuthCode } from "./auth.js";
 import {
   cancelBidByAdmin,
   clearPaymentPreauthorization,
+  createAdminAlert,
   createPendingBidAttempt,
   deletePendingBidAttempt,
   getAccountItemsForUser,
@@ -34,6 +35,7 @@ import {
   getWinningItemsForUser,
   initDb,
   deleteAdminItem,
+  listAdminAlerts,
   listAdminBidRows,
   listAdminItems,
   placeBid,
@@ -48,12 +50,15 @@ import {
   updateUserNickname,
   upsertItemsFromRows
 } from "./db.js";
-import { sendPaymentCollectedNotificationIfNeeded } from "./notifications.js";
+import {
+  sendAdminPaymentFailureAlert,
+  sendAdminPaymentSuccessAlert,
+  sendPaymentCollectedNotificationIfNeeded
+} from "./notifications.js";
 import { parseCsv, toCsv } from "./csv.js";
 import { Flash, Viewer } from "./types.js";
 import { clampBidAmount, env, hashValue, randomToken } from "./utils.js";
 import {
-  renderAdminLogin,
   renderAdminDeleteConfirm,
   renderAdminPanel,
   renderCategories,
@@ -94,44 +99,84 @@ app.use(express.static(path.resolve(process.cwd(), "public")));
 
 app.use((req, res, next) => {
   const cookies = parseCookies(req.headers.cookie || "");
+  const csrfToken = cookies.csrf || randomToken();
+  if (!cookies.csrf) {
+    res.append("Set-Cookie", serializeCookie("csrf", csrfToken, {}));
+  }
   const viewer = cookies.session ? getViewerBySessionHash(hashValue(cookies.session)) : null;
   const flash = cookies.flash ? decodeFlash(cookies.flash) : null;
   if (cookies.flash) {
-    res.setHeader("Set-Cookie", serializeCookie("flash", "", { expires: new Date(0) }));
+    res.append("Set-Cookie", serializeCookie("flash", "", { expires: new Date(0) }));
   }
   res.locals.viewer = viewer;
   res.locals.flash = flash;
   res.locals.auctionEndsAt = getAuctionEndsAt();
+  res.locals.csrfToken = csrfToken;
   next();
+});
+
+app.use((req, res, next) => {
+  if (req.method !== "POST" || req.path === "/stripe/webhook") {
+    next();
+    return;
+  }
+  const cookies = parseCookies(req.headers.cookie || "");
+  const cookieToken = cookies.csrf || "";
+  const bodyToken = typeof req.body?._csrf === "string" ? req.body._csrf : "";
+  if (!cookieToken || !bodyToken || cookieToken !== bodyToken) {
+    res.status(403).send(renderPage(
+      "Forbidden",
+      `<section class="section"><h1>Request could not be verified.</h1><p>Please go back and try again.</p></section>`,
+      res.locals.viewer,
+      { kind: "error", message: "Request verification failed." },
+      res.locals.csrfToken as string
+    ));
+    return;
+  }
+  next();
+});
+
+app.use((req, res, next) => {
+  const viewer = res.locals.viewer as Viewer | null;
+  if (!viewer || viewer.nickname.trim()) {
+    next();
+    return;
+  }
+  const allowed = new Set(["/login/nickname", "/logout"]);
+  if (allowed.has(req.path) || req.path.startsWith("/preauth/") || req.path === "/login" || req.path === "/login/start" || req.path === "/login/resend" || req.path === "/login/verify") {
+    next();
+    return;
+  }
+  redirectWithFlash(res, "/login/nickname", { kind: "info", message: "Set your nickname before using the app." });
 });
 
 app.get("/", (_req, res) => {
   const categories = getCategories();
   const feed = getHomeFeed();
-  res.send(renderPage("Home", renderHome(feed, categories, getSiteContentSettings()), res.locals.viewer, res.locals.flash));
+  res.send(renderPage("Home", renderHome(feed, categories, getSiteContentSettings()), res.locals.viewer, res.locals.flash, res.locals.csrfToken as string));
 });
 
 app.get("/categories", (_req, res) => {
-  res.send(renderPage("Categories", renderCategories(getCategories()), res.locals.viewer, res.locals.flash));
+  res.send(renderPage("Categories", renderCategories(getCategories()), res.locals.viewer, res.locals.flash, res.locals.csrfToken as string));
 });
 
 app.get("/categories/:slug", (req, res) => {
   const category = getCategories().find((entry) => entry.slug === req.params.slug);
   if (!category) {
-    res.status(404).send(renderPage("Not found", `<section class="section"><h1>Category not found</h1></section>`, res.locals.viewer, res.locals.flash));
+    res.status(404).send(renderPage("Not found", `<section class="section"><h1>Category not found</h1></section>`, res.locals.viewer, res.locals.flash, res.locals.csrfToken as string));
     return;
   }
-  res.send(renderPage(category.name, renderCategoryPage(category, getPopularItemsPage(18, 0, category.slug)), res.locals.viewer, res.locals.flash));
+  res.send(renderPage(category.name, renderCategoryPage(category, getPopularItemsPage(18, 0, category.slug)), res.locals.viewer, res.locals.flash, res.locals.csrfToken as string));
 });
 
 app.get("/items/:slug", (req, res) => {
   const item = getItemBySlug(req.params.slug);
   if (!item) {
-    res.status(404).send(renderPage("Not found", `<section class="section"><h1>Item not found</h1></section>`, res.locals.viewer, res.locals.flash));
+    res.status(404).send(renderPage("Not found", `<section class="section"><h1>Item not found</h1></section>`, res.locals.viewer, res.locals.flash, res.locals.csrfToken as string));
     return;
   }
   const body = renderItemPage(item, getBidHistory(item.id), getNextMinimumBid(item), isAuctionClosed(res.locals.auctionEndsAt), res.locals.viewer);
-  res.send(renderPage(item.title, body, res.locals.viewer, res.locals.flash));
+  res.send(renderPage(item.title, body, res.locals.viewer, res.locals.flash, res.locals.csrfToken as string));
 });
 
 app.post("/items/:slug/bid", async (req, res) => {
@@ -201,42 +246,24 @@ app.post("/items/:slug/proxy", async (req, res) => {
 });
 
 app.get("/login", (_req, res) => {
-  res.send(renderPage("Sign in", renderLoginPage("start"), res.locals.viewer, res.locals.flash));
+  res.send(renderPage("Sign in", renderLoginPage("start"), res.locals.viewer, res.locals.flash, res.locals.csrfToken as string));
 });
 
 app.post("/login/start", async (req, res) => {
   try {
     const contact = String(req.body.contact || "");
-    const nickname = String(req.body.nickname || "");
-    const authRequest = await requestAuthCode(contact, nickname);
-    res.send(renderPage("Verify code", renderLoginPage("verify", {
-      contact: authRequest.contact,
-      nickname,
-      isNew: false
-    }), res.locals.viewer, res.locals.flash));
+    const authRequest = await requestAuthCode(contact);
+    res.send(renderPage("Verify code", renderLoginPage("verify", { contact: authRequest.contact }), res.locals.viewer, res.locals.flash, res.locals.csrfToken as string));
   } catch (error) {
     redirectWithFlash(res, "/login", { kind: "error", message: error instanceof Error ? error.message : "Could not continue." });
-  }
-});
-
-app.post("/login/register", async (req, res) => {
-  try {
-    const contact = String(req.body.contact || "");
-    const nickname = String(req.body.nickname || "");
-    const authRequest = await requestAuthCode(contact, nickname);
-    res.send(renderPage("Verify code", renderLoginPage("verify", { contact: authRequest.contact, nickname, isNew: true }), res.locals.viewer, res.locals.flash));
-  } catch (error) {
-    redirectWithFlash(res, "/login", { kind: "error", message: error instanceof Error ? error.message : "Could not start registration." });
   }
 });
 
 app.post("/login/resend", async (req, res) => {
   try {
     const contact = String(req.body.contact || "");
-    const nickname = String(req.body.nickname || "");
-    const isNew = String(req.body.is_new || "") === "1";
-    const authRequest = await requestAuthCode(contact, nickname);
-    res.send(renderPage("Verify code", renderLoginPage("verify", { contact: authRequest.contact, nickname, isNew }), res.locals.viewer, res.locals.flash));
+    const authRequest = await requestAuthCode(contact);
+    res.send(renderPage("Verify code", renderLoginPage("verify", { contact: authRequest.contact }), res.locals.viewer, res.locals.flash, res.locals.csrfToken as string));
   } catch (error) {
     redirectWithFlash(res, "/login", { kind: "error", message: error instanceof Error ? error.message : "Could not resend code." });
   }
@@ -244,12 +271,44 @@ app.post("/login/resend", async (req, res) => {
 
 app.post("/login/verify", (req, res) => {
   try {
-    const session = verifyAuthCode(String(req.body.contact || ""), String(req.body.code || ""), getClientKey(req));
-    setSessionCookie(res, session.token, session.expiresAt);
+    const result = verifyAuthCode(String(req.body.contact || ""), String(req.body.code || ""), getClientKey(req));
+    setSessionCookie(res, result.session.token, result.session.expiresAt);
+    if (result.needsNickname) {
+      redirectWithFlash(res, "/login/nickname", { kind: "info", message: "Set your nickname to finish signing in." });
+      return;
+    }
     redirectWithFlash(res, "/", { kind: "success", message: "You are signed in." });
   } catch (error) {
     redirectWithFlash(res, "/login", { kind: "error", message: error instanceof Error ? error.message : "Could not verify code." });
   }
+});
+
+app.get("/login/nickname", (_req, res) => {
+  const viewer = res.locals.viewer as Viewer | null;
+  if (!viewer) {
+    redirectWithFlash(res, "/login", { kind: "error", message: "Sign in first." });
+    return;
+  }
+  if (viewer.nickname.trim()) {
+    redirectWithFlash(res, "/", { kind: "info", message: "Nickname already set." });
+    return;
+  }
+  res.send(renderPage("Set nickname", renderLoginPage("nickname"), viewer, res.locals.flash, res.locals.csrfToken as string));
+});
+
+app.post("/login/nickname", (req, res) => {
+  const viewer = res.locals.viewer as Viewer | null;
+  if (!viewer) {
+    redirectWithFlash(res, "/login", { kind: "error", message: "Sign in first." });
+    return;
+  }
+  const nickname = String(req.body.nickname || "").trim();
+  if (!nickname) {
+    redirectWithFlash(res, "/login/nickname", { kind: "error", message: "Nickname is required." });
+    return;
+  }
+  updateUserNickname(viewer.id, nickname);
+  redirectWithFlash(res, "/", { kind: "success", message: "Nickname saved." });
 });
 
 app.get("/account", (req, res) => {
@@ -275,10 +334,11 @@ app.get("/account", (req, res) => {
     {
       outbid: Boolean(getNotificationPreferences(viewer.id).outbid_enabled),
       won: Boolean(getNotificationPreferences(viewer.id).won_enabled),
-      payment: Boolean(getNotificationPreferences(viewer.id).payment_enabled)
+      payment: Boolean(getNotificationPreferences(viewer.id).payment_enabled),
+      adminPayment: Boolean(getNotificationPreferences(viewer.id).admin_payment_enabled)
     }
   );
-  res.send(renderPage("Profile", body, viewer, res.locals.flash));
+  res.send(renderPage("Profile", body, viewer, res.locals.flash, res.locals.csrfToken as string));
 });
 
 app.post("/account/notifications", (req, res) => {
@@ -290,7 +350,8 @@ app.post("/account/notifications", (req, res) => {
   updateNotificationPreferences(viewer.id, {
     outbid: String(req.body.outbid || "") === "1",
     won: String(req.body.won || "") === "1",
-    payment: String(req.body.payment || "") === "1"
+    payment: String(req.body.payment || "") === "1",
+    adminPayment: viewer.isAdmin && String(req.body.admin_payment || "") === "1"
   });
   redirectWithFlash(res, "/account", { kind: "success", message: "Notification settings updated." });
 });
@@ -368,6 +429,13 @@ app.get("/preauth/complete", async (req, res) => {
     }
     redirectWithFlash(res, `/items/${item.slug}`, { kind: "success", message: "Preauthorization complete and bid placed." });
   } catch (error) {
+    if (error instanceof Error && error.message.includes("Stripe")) {
+      redirectWithFlash(res, `/items/${getItemById(attempt.item_id)?.slug || ""}`, {
+        kind: "error",
+        message: "We could not confirm Stripe yet. Try opening the return link again in a moment."
+      });
+      return;
+    }
     deletePendingBidAttempt(attemptToken);
     redirectWithFlash(res, "/", { kind: "error", message: error instanceof Error ? error.message : "Could not complete bid." });
   }
@@ -420,6 +488,10 @@ app.post("/logout", (req, res) => {
   redirectWithFlash(res, "/", { kind: "info", message: "You are signed out." });
 });
 
+app.get("/logout", (req, res) => {
+  redirectWithFlash(res, "/", { kind: "info", message: "Use the log out button to sign out." });
+});
+
 app.get("/wins", (req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer) {
@@ -427,7 +499,7 @@ app.get("/wins", (req, res) => {
     return;
   }
   const body = renderWinsPage(isAuctionClosed(res.locals.auctionEndsAt) ? getWinningItemsForUser(viewer.id) : []);
-  res.send(renderPage("My wins", body, viewer, res.locals.flash));
+  res.send(renderPage("My wins", body, viewer, res.locals.flash, res.locals.csrfToken as string));
 });
 
 app.get("/api/items", (req, res) => {
@@ -442,23 +514,13 @@ app.get("/api/items", (req, res) => {
 });
 
 app.get("/admin/login", (_req, res) => {
-  res.send(renderPage("Admin login", renderAdminLogin(), res.locals.viewer, res.locals.flash));
-});
-
-app.post("/admin/login", (req, res) => {
-  try {
-    const session = createAdminSession(String(req.body.password || ""), getClientKey(req));
-    setSessionCookie(res, session.token, session.expiresAt);
-    redirectWithFlash(res, "/admin", { kind: "success", message: "Admin session active." });
-  } catch (error) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: error instanceof Error ? error.message : "Could not sign in." });
-  }
+  redirectWithFlash(res, "/login", { kind: "info", message: "Sign in with the configured admin contact to access admin tools." });
 });
 
 app.get("/admin", (_req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   res.send(renderPage("Admin", renderAdminPanel(
@@ -467,15 +529,16 @@ app.get("/admin", (_req, res) => {
     isAuctionClosed(res.locals.auctionEndsAt),
     listAdminBidRows(),
     getWinnerEligibilityAlerts(),
+    listAdminAlerts(),
     res.locals.auctionEndsAt,
     getSiteContentSettings()
-  ), viewer, res.locals.flash));
+  ), viewer, res.locals.flash, res.locals.csrfToken as string));
 });
 
 app.post("/admin/auction-end", (req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   const raw = String(req.body.auction_ends_at || "").trim();
@@ -491,7 +554,7 @@ app.post("/admin/auction-end", (req, res) => {
 app.post("/admin/site-content", (req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   const siteTitle = String(req.body.site_title || "").trim();
@@ -508,7 +571,7 @@ app.post("/admin/site-content", (req, res) => {
 app.post("/admin/items", (req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   try {
@@ -522,7 +585,7 @@ app.post("/admin/items", (req, res) => {
 app.post("/admin/items/:id", (req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   try {
@@ -536,7 +599,7 @@ app.post("/admin/items/:id", (req, res) => {
 app.get("/admin/items/:id/delete", (req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   const item = getAdminItemById(Number(req.params.id));
@@ -544,13 +607,13 @@ app.get("/admin/items/:id/delete", (req, res) => {
     redirectWithFlash(res, "/admin", { kind: "error", message: "Item not found." });
     return;
   }
-  res.send(renderPage("Confirm delete", renderAdminDeleteConfirm(item), viewer, res.locals.flash));
+  res.send(renderPage("Confirm delete", renderAdminDeleteConfirm(item), viewer, res.locals.flash, res.locals.csrfToken as string));
 });
 
 app.post("/admin/items/:id/delete", (req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   try {
@@ -564,7 +627,7 @@ app.post("/admin/items/:id/delete", (req, res) => {
 app.post("/admin/winners/users/:userId/collect", async (req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   if (!isAuctionClosed(res.locals.auctionEndsAt)) {
@@ -613,7 +676,7 @@ app.post("/admin/winners/users/:userId/collect", async (req, res) => {
 app.post("/admin/bids/:id/cancel", (req, res) => {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   try {
@@ -635,8 +698,7 @@ app.get("/admin/export.csv", (_req, res) => {
   res.send(toCsv(listAdminItems()));
 });
 
-app.post("/admin/upload", upload.single("sheet"), (req, res) => handleAdminUpload(req.file?.buffer, "upload", res));
-app.post("/admin/update", upload.single("sheet"), (req, res) => handleAdminUpload(req.file?.buffer, "update", res));
+app.post("/admin/upload", upload.single("sheet"), (req, res) => handleAdminUpload(req.file?.buffer, res));
 
 app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
@@ -653,15 +715,16 @@ app.listen(port, () => {
   console.log(`${auctionName} listening on http://localhost:${port}`);
 });
 
-function renderPage(title: string, body: string, viewer: Viewer | null, flash: Flash | null) {
+function renderPage(title: string, body: string, viewer: Viewer | null, flash: Flash | null, csrfToken: string) {
   const content = getSiteContentSettings();
   return renderLayout({
     title: `${title} | ${content.siteTitle}`,
     auctionEndsAt: getAuctionEndsAt(),
     siteTitle: content.siteTitle,
+    csrfToken,
     viewer,
     flash,
-    body
+    body: injectCsrfFields(body, csrfToken)
   });
 }
 
@@ -703,6 +766,10 @@ function shouldUseSecureCookies() {
   return baseUrl.startsWith("https://") || env("NODE_ENV") === "production";
 }
 
+function injectCsrfFields(body: string, csrfToken: string) {
+  return body.replace(/<form\b([^>]*)>/g, `<form$1><input type="hidden" name="_csrf" value="${csrfToken}" />`);
+}
+
 function encodeFlash(flash: Flash) {
   return Buffer.from(JSON.stringify(flash), "utf8").toString("base64url");
 }
@@ -715,10 +782,10 @@ function decodeFlash(value: string): Flash | null {
   }
 }
 
-function handleAdminUpload(buffer: Buffer | undefined, mode: "upload" | "update", res: express.Response) {
+function handleAdminUpload(buffer: Buffer | undefined, res: express.Response) {
   const viewer = res.locals.viewer as Viewer | null;
   if (!viewer?.isAdmin) {
-    redirectWithFlash(res, "/admin/login", { kind: "error", message: "Admin access required." });
+    redirectWithFlash(res, "/login", { kind: "error", message: "Admin access required." });
     return;
   }
   if (!buffer) {
@@ -732,8 +799,8 @@ function handleAdminUpload(buffer: Buffer | undefined, mode: "upload" | "update"
     return;
   }
   const mapped = entries.map((row) => Object.fromEntries(headers.map((header, index) => [header.trim(), row[index] ?? ""])));
-  upsertItemsFromRows(mapped, mode);
-  redirectWithFlash(res, "/admin", { kind: "success", message: mode === "upload" ? "CSV uploaded." : "CSV uploaded and existing rows updated." });
+  upsertItemsFromRows(mapped);
+  redirectWithFlash(res, "/admin", { kind: "success", message: "Spreadsheet uploaded. Items were added or updated in place." });
 }
 
 async function maybeRequireBidPreauthorization(
@@ -1001,12 +1068,18 @@ async function handleStripeWebhook(req: express.Request) {
     updatePurchasesForStripeSession(session.id, "paid");
     const totalAmountCents = purchases.reduce((sum, purchase) => sum + purchase.amount_cents, 0);
     await sendPaymentCollectedNotificationIfNeeded(purchases[0].user_id, totalAmountCents);
+    await sendAdminPaymentSuccessAlert(
+      `Payment collected successfully for Stripe session ${session.id}. Total: $${(totalAmountCents / 100).toFixed(2)}.`
+    );
     return;
   }
 
   if (event.type === "checkout.session.expired" || event.type === "checkout.session.async_payment_failed") {
     updatePurchasesForStripeSession(session.id, "payment_failed");
-    console.error(`[stripe-payment-failed] session=${session.id} status=${session.status || "unknown"} payment_status=${session.payment_status || "unknown"}`);
+    const message = `Payment collection failed for Stripe session ${session.id}. Status: ${session.status || "unknown"}. Payment status: ${session.payment_status || "unknown"}.`;
+    createAdminAlert("error", message);
+    await sendAdminPaymentFailureAlert(message);
+    console.error(`[stripe-payment-failed] ${message}`);
   }
 }
 

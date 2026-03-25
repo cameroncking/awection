@@ -5,7 +5,7 @@ Mobile-first silent auction app built with TypeScript, Express, and SQLite.
 ## Quick Start
 
 1. Copy `.env.example` to `.env`
-2. Set `ADMIN_PASSWORD`
+2. Set `ADMIN_CONTACT`
 3. Install dependencies
 
 ```bash
@@ -37,21 +37,24 @@ Important values:
 - `PORT`
 - `BASE_URL`
 - `DB_PATH`
-- `ADMIN_PASSWORD`
+- `ADMIN_CONTACT`
 - `AUCTION_ENDS_AT`
 - `RESEND_API_KEY` / `RESEND_FROM`
 - `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM`
 - `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
 
 Notes:
 
 - `AUCTION_ENDS_AT` is only the initial default. Admins can later change the stored end time from the admin UI.
+- `ADMIN_CONTACT` accepts a comma-separated list of admin email addresses and/or phone numbers. Any user who signs in with a matching contact gets admin privileges.
 - If Resend or Twilio are missing, auth codes and notifications are logged to the server console.
 - If Stripe is missing, bid-time preauthorization is faked and logged.
+- Admin payment success/failure notifications are configured in the admin UI after an admin signs in.
 
 ## Admin
 
-Admin access uses a single password.
+Admin access uses passwordless sign-in. Any contact listed in `ADMIN_CONTACT` receives admin privileges after code verification.
 
 Admin capabilities:
 
