@@ -1,0 +1,17 @@
+.env
+node_modules/
+dist/
+data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
+*.sqlite-wal
+*.sqlite-shm
+
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+.DS_Store
+Thumbs.db
