@@ -31,9 +31,10 @@ The homepage is composed in this order:
 
 - Passwordless sign-in only
 - User starts with email or phone
-- Existing users go straight to code verification
-- New users can optionally provide a nickname before code verification
-- If no nickname is provided, one is generated
+- The next step is code verification
+- Accounts are created immediately after successful code verification
+- If a user has no nickname yet, they are redirected to set one before using the app
+- Nicknames are required and are never auto-generated
 - Auth codes are throttled to one send every 5 minutes per contact
 
 ## Bidding
@@ -81,7 +82,7 @@ Admins can:
 
 ## CSV Import
 
-CSV upload supports new item import and upload-and-update flows.
+CSV upload adds new items and updates existing items in place by slug.
 
 Typical columns:
 
@@ -108,6 +109,7 @@ Supported preference toggles:
 - outbid notifications
 - winning item notifications
 - payment collected notifications
+- admin payment success/failure notifications for admin users
 
 Delivery behavior:
 

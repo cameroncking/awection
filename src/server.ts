@@ -7,8 +7,8 @@ import { clearSession, requestAuthCode, verifyAuthCode } from "./auth.js";
 import {
   cancelBidByAdmin,
   clearPaymentPreauthorization,
-  createAdminAlert,
   createPendingBidAttempt,
+  createAdminAlert,
   deletePendingBidAttempt,
   getAccountItemsForUser,
   getActiveBidCommitmentCount,
@@ -120,10 +120,12 @@ app.use((req, res, next) => {
     next();
     return;
   }
-  const cookies = parseCookies(req.headers.cookie || "");
-  const cookieToken = cookies.csrf || "";
-  const bodyToken = typeof req.body?._csrf === "string" ? req.body._csrf : "";
-  if (!cookieToken || !bodyToken || cookieToken !== bodyToken) {
+  const contentType = String(req.headers["content-type"] || "");
+  if (contentType.startsWith("multipart/form-data")) {
+    next();
+    return;
+  }
+  if (!hasValidCsrfToken(req)) {
     res.status(403).send(renderPage(
       "Forbidden",
       `<section class="section"><h1>Request could not be verified.</h1><p>Please go back and try again.</p></section>`,
@@ -698,7 +700,19 @@ app.get("/admin/export.csv", (_req, res) => {
   res.send(toCsv(listAdminItems()));
 });
 
-app.post("/admin/upload", upload.single("sheet"), (req, res) => handleAdminUpload(req.file?.buffer, res));
+app.post("/admin/upload", upload.single("sheet"), (req, res) => {
+  if (!hasValidCsrfToken(req)) {
+    res.status(403).send(renderPage(
+      "Forbidden",
+      `<section class="section"><h1>Request could not be verified.</h1><p>Please go back and try again.</p></section>`,
+      res.locals.viewer,
+      { kind: "error", message: "Request verification failed." },
+      res.locals.csrfToken as string
+    ));
+    return;
+  }
+  handleAdminUpload(req.file?.buffer, res);
+});
 
 app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (error instanceof multer.MulterError && error.code === "LIMIT_FILE_SIZE") {
@@ -759,6 +773,13 @@ function serializeCookie(name: string, value: string, options: { expires?: Date 
     bits.push(`Expires=${options.expires.toUTCString()}`);
   }
   return bits.join("; ");
+}
+
+function hasValidCsrfToken(req: express.Request) {
+  const cookies = parseCookies(req.headers.cookie || "");
+  const cookieToken = cookies.csrf || "";
+  const bodyToken = typeof req.body?._csrf === "string" ? req.body._csrf : "";
+  return Boolean(cookieToken && bodyToken && cookieToken === bodyToken);
 }
 
 function shouldUseSecureCookies() {

@@ -50,7 +50,7 @@ Notes:
 - `ADMIN_CONTACT` accepts a comma-separated list of admin email addresses and/or phone numbers. Any user who signs in with a matching contact gets admin privileges.
 - If Resend or Twilio are missing, auth codes and notifications are logged to the server console.
 - If Stripe is missing, bid-time preauthorization is faked and logged.
-- Admin payment success/failure notifications are configured in the admin UI after an admin signs in.
+- Admin payment success/failure notifications are configured from the profile page after an admin signs in.
 
 ## Admin
 
@@ -59,7 +59,7 @@ Admin access uses passwordless sign-in. Any contact listed in `ADMIN_CONTACT` re
 Admin capabilities:
 
 - Edit, add, and delete items directly in the item table
-- Import/export/update CSV
+- Import/export CSV with add-or-update behavior by slug
 - Change auction end time
 - Change site title and homepage copy
 - Review winners after the auction closes
@@ -75,6 +75,14 @@ Admin capabilities:
 - `/account`
 - `/wins`
 - `/admin`
+
+## Authentication
+
+- Sign-in starts with email or phone only
+- The next step is code verification
+- Accounts are created immediately after successful code verification
+- Users with a blank nickname are redirected to set one before using the app
+- Nicknames are required and are never auto-generated
 
 ## CSV
 
