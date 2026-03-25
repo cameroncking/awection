@@ -8,11 +8,21 @@ import {
   recordSecurityEvent
 } from "./db.js";
 import { ContactKind, Viewer } from "./types.js";
-import { detectContactKind, env, generateCode, hashValue, normalizeEmail, normalizePhone, nowIso, randomToken } from "./utils.js";
+import {
+  detectContactKind,
+  env,
+  generateCode,
+  hashValue,
+  isValidEmail,
+  isValidPhone,
+  normalizeEmail,
+  normalizePhone,
+  nowIso,
+  randomToken
+} from "./utils.js";
 
 export async function requestAuthCode(contactInput: string) {
-  const kind = detectContactKind(contactInput) as ContactKind;
-  const contact = kind === "email" ? normalizeEmail(contactInput) : normalizePhone(contactInput);
+  const { kind, contact } = normalizeAndValidateContact(contactInput);
   pruneSecurityEvents(new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
   const latest = db.prepare(`
     SELECT created_at
@@ -90,8 +100,7 @@ export async function deliverMessage(
 }
 
 export function verifyAuthCode(contactInput: string, code: string, remoteKey: string) {
-  const kind = detectContactKind(contactInput) as ContactKind;
-  const contact = kind === "email" ? normalizeEmail(contactInput) : normalizePhone(contactInput);
+  const { kind, contact } = normalizeAndValidateContact(contactInput);
   const normalizedRemoteKey = remoteKey.trim() || "unknown";
   const verifyWindowStart = new Date(Date.now() - 10 * 60 * 1000).toISOString();
   const contactFailures = countSecurityEventsSince("auth_verify_contact", contact, verifyWindowStart);
@@ -153,4 +162,18 @@ function isAdminContact(contact: string) {
     const normalized = kind === "email" ? normalizeEmail(entry) : normalizePhone(entry);
     return contact === normalized;
   });
+}
+
+function normalizeAndValidateContact(contactInput: string) {
+  const kind = detectContactKind(contactInput) as ContactKind;
+  if (kind === "email") {
+    if (!isValidEmail(contactInput)) {
+      throw new Error("Enter a valid email address.");
+    }
+    return { kind, contact: normalizeEmail(contactInput) };
+  }
+  if (!isValidPhone(contactInput)) {
+    throw new Error("Enter a valid phone number.");
+  }
+  return { kind, contact: normalizePhone(contactInput) };
 }

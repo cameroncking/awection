@@ -51,6 +51,20 @@ export function detectContactKind(value: string) {
   return value.includes("@") ? "email" : "phone";
 }
 
+export function isValidEmail(value: string) {
+  const normalized = normalizeEmail(value);
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized);
+}
+
+export function isValidPhone(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || !/^\+?[\d\s().-]+$/.test(trimmed)) {
+    return false;
+  }
+  const digitsOnly = trimmed.replace(/\D/g, "");
+  return digitsOnly.length >= 10 && digitsOnly.length <= 15;
+}
+
 export function nicknameFromSeed(seed: string) {
   const adjective = [
     "Swift", "Bright", "Lucky", "Golden", "Kind", "Quiet", "Happy", "Clever", "Sunny", "Brave"
